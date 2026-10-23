@@ -1974,8 +1974,8 @@ const AREA_TABLE: &str = "import pytest\nfrom src.shop import area\n\n\n@pytest.
 
 #[test]
 fn reordered_factors_are_not_an_unvaried_table_operand() -> Result<(), String> {
-    // `a * b` -> `b * a` changes no value, so rows that agree on both sides
-    // say nothing about an operand the table fails to vary.
+    // The parametrize rows bind both names to integer literals, so the table
+    // proves this call path uses numeric operands.
     assert_eq!(
         classify(AREA, 2, "    return a * b", AREA_TABLE)?,
         ExposureClass::Exposed
@@ -1988,6 +1988,32 @@ fn reordered_factors_are_not_an_unvaried_table_operand() -> Result<(), String> {
             "    return a + b",
             AREA_TABLE
         )?,
+        ExposureClass::Exposed
+    );
+    Ok(())
+}
+
+#[test]
+fn unknown_factor_types_keep_the_unvaried_table_reading() -> Result<(), String> {
+    let owner = "def area(a: Matrix, b: Matrix):\n    return b * a\n";
+    assert_ne!(
+        classify(owner, 2, "    return a * b", AREA_TABLE)?,
+        ExposureClass::Exposed
+    );
+    Ok(())
+}
+
+#[test]
+fn numeric_factor_reorder_is_not_an_unvaried_table_operand() -> Result<(), String> {
+    let annotated = "def area(a: int, b: float):\n    return b * a\n";
+    assert_eq!(
+        classify(annotated, 2, "    return a * b", AREA_TABLE)?,
+        ExposureClass::Exposed
+    );
+
+    let bound = "A = 3\nB = 7\n\ndef area(a, b):\n    return B * A\n";
+    assert_eq!(
+        classify(bound, 5, "    return A * B", AREA_TABLE)?,
         ExposureClass::Exposed
     );
     Ok(())

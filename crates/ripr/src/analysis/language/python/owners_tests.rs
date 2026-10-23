@@ -293,6 +293,11 @@ fn function_parameters(source: &str, args: &ast::Arguments) -> Vec<PythonParamet
                 .default
                 .as_ref()
                 .map(|default| text_for_range(source, default.range()).trim().to_string()),
+            annotation: arg.def.annotation.as_ref().map(|annotation| {
+                text_for_range(source, annotation.range())
+                    .trim()
+                    .to_string()
+            }),
             keyword_only,
             positional_only,
         };

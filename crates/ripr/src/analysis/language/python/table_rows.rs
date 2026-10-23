@@ -132,12 +132,13 @@ fn unvaried_arithmetic_operand(
     let old_line = old_line_text?;
     let (old_arith, new_arith) = changed_simple_arithmetic(old_line, line_text)?;
     // Reordering the factors of a product changes no value, so rows that
-    // agree on both sides say nothing about an unvaried operand.
+    // agree on both sides say nothing about an unvaried operand when both
+    // factors are known numeric values.
     // Only when the whole returned value is the product: a reorder beside a
     // sibling edit (`a * b, c` -> `b * a, d`) still needs the row reading.
     let whole = |line: &str| line_value_expr(line).and_then(|text| parse_expr(&text));
     if let (Some(old_whole), Some(new_whole)) = (whole(old_line), whole(line_text))
-        && is_factor_reorder(&old_whole, &new_whole)
+        && is_factor_reorder(&old_whole, &new_whole, owner, related_candidates, focus)
     {
         return None;
     }
@@ -305,14 +306,24 @@ fn arithmetic_rows_agree(
     })
 }
 
-/// `a * b` -> `b * a` over plain names and integer literals. Multiplication
-/// commutes for every builtin operand type (`3 * "ab"` equals `"ab" * 3`), which
-/// is why `+` is not accepted here: `a + b` -> `b + a` reorders strings.
-fn is_factor_reorder(old: &Expr, new: &Expr) -> bool {
+/// `a * b` -> `b * a` when both factors have numeric evidence. A user-defined
+/// `__mul__` may be non-commutative, so a bare name is not enough evidence.
+fn is_factor_reorder(
+    old: &Expr,
+    new: &Expr,
+    owner: &PythonOwner,
+    related_candidates: &[PythonRelatedCandidate<'_>],
+    focus: &PythonAssertionFocus,
+) -> bool {
     let (Expr::BinOp(old), Expr::BinOp(new)) = (old, new) else {
         return false;
     };
     if !matches!(old.op, ast::Operator::Mult) || !matches!(new.op, ast::Operator::Mult) {
+        return false;
+    }
+    if !factor_is_numeric(&old.left, owner, related_candidates, focus)
+        || !factor_is_numeric(&old.right, owner, related_candidates, focus)
+    {
         return false;
     }
     let (Some(old_left), Some(old_right), Some(new_left), Some(new_right)) = (
@@ -324,6 +335,116 @@ fn is_factor_reorder(old: &Expr, new: &Expr) -> bool {
         return false;
     };
     old_left == new_right && old_right == new_left
+}
+
+fn factor_is_numeric(
+    expr: &Expr,
+    owner: &PythonOwner,
+    related_candidates: &[PythonRelatedCandidate<'_>],
+    focus: &PythonAssertionFocus,
+) -> bool {
+    match expr {
+        Expr::Constant(constant) => is_numeric_constant(&constant.value),
+        Expr::Name(name) => {
+            let name = name.id.as_str();
+            if owner
+                .module_constants
+                .iter()
+                .any(|constant| constant.name == name && is_numeric_literal_text(&constant.value))
+            {
+                return true;
+            }
+            if let Some(parameter) = owner
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == name)
+                && let Some(annotation) = parameter.annotation.as_deref()
+            {
+                return is_numeric_annotation(annotation);
+            }
+            table_binds_numeric_name(name, owner, related_candidates, focus)
+        }
+        _ => false,
+    }
+}
+
+fn is_numeric_constant(constant: &ast::Constant) -> bool {
+    matches!(constant, ast::Constant::Int(_) | ast::Constant::Float(_))
+}
+
+fn is_numeric_literal_text(text: &str) -> bool {
+    parse_expr(text).is_some_and(|expr| numeric_literal_expression(&expr))
+}
+
+fn is_numeric_annotation(annotation: &str) -> bool {
+    matches!(
+        annotation.trim(),
+        "int" | "float" | "builtins.int" | "builtins.float"
+    )
+}
+
+fn table_binds_numeric_name(
+    name: &str,
+    owner: &PythonOwner,
+    related_candidates: &[PythonRelatedCandidate<'_>],
+    focus: &PythonAssertionFocus,
+) -> bool {
+    let mut saw_table = false;
+    for candidate in related_candidates {
+        if !candidate.relation.uses_oracle() {
+            continue;
+        }
+        let strong_assertions: Vec<&PythonAssertion> = candidate
+            .test
+            .assertions
+            .iter()
+            .filter(|assertion| {
+                focus.admits(assertion)
+                    && assertion.oracle_strength.rank() >= OracleStrength::Strong.rank()
+            })
+            .collect();
+        if strong_assertions.is_empty() {
+            continue;
+        }
+        let Some(table) = table_cases(candidate.test) else {
+            return false;
+        };
+        if table.cases.is_empty() {
+            return false;
+        }
+        let columns = table.argnames();
+        for assertion in strong_assertions {
+            let Some(stmts) = assertion_stmts(&assertion.gate_text) else {
+                return false;
+            };
+            let Some(owner_call) =
+                owner_call_from_equality(&stmts, &owner_names(owner, candidate.test))
+            else {
+                return false;
+            };
+            let Some(column) = operand_column(owner_call, name, owner, &columns) else {
+                return false;
+            };
+            if !table.cases.iter().all(|row| {
+                row.get(&column)
+                    .is_some_and(|value| is_numeric_literal_text(value))
+            }) {
+                return false;
+            }
+        }
+        saw_table = true;
+    }
+    saw_table
+}
+
+fn numeric_literal_expression(expr: &Expr) -> bool {
+    match expr {
+        Expr::Constant(constant) => is_numeric_constant(&constant.value),
+        Expr::UnaryOp(unary) if matches!(unary.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) => {
+            numeric_literal_expression(&unary.operand)
+        }
+        _ => false,
+    }
 }
 
 fn factor_key(expr: &Expr) -> Option<String> {

@@ -300,6 +300,8 @@ struct PythonParameter {
     name: String,
     /// Source text of the default value, when one is declared.
     default: Option<String>,
+    /// Source text of the declared type, when one is present.
+    annotation: Option<String>,
     /// Keyword-only parameters (after `*` / `*args`) never bind positionally.
     keyword_only: bool,
     /// Positional-only parameters (before `/`) never bind by keyword.
